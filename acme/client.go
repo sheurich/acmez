@@ -189,6 +189,10 @@ type DirectoryMeta struct {
 	CAAIdentities           []string `json:"caaIdentities,omitempty"`
 	ExternalAccountRequired bool     `json:"externalAccountRequired,omitempty"`
 
+	// DNS-PERSIST-01 directory metadata (draft-ietf-acme-dns-persist-03 §§3.2, 4.1).
+	IssuerDomainNames []string `json:"issuerDomainNames,omitempty"`
+	AccountHashPrefix string   `json:"accountHashPrefix,omitempty"`
+
 	// ACME profiles are an EXPERIMENTAL DRAFT feature and are subject to change. See:
 	// - https://letsencrypt.org/2025/01/09/acme-profiles/
 	// - https://datatracker.ietf.org/doc/draft-aaron-acme-profiles/

@@ -580,6 +580,7 @@ func (c *Client) pollAuthorization(ctx context.Context, account acme.Account, au
 				switch problem.Type {
 				case acme.ProblemTypeConnection,
 					acme.ProblemTypeDNS,
+					acme.ProblemTypePersistExpired,
 					acme.ProblemTypeServerInternal,
 					acme.ProblemTypeUnauthorized,
 					acme.ProblemTypeTLS:

@@ -20,6 +20,7 @@ import (
 	"encoding/base32"
 	"encoding/base64"
 	"fmt"
+	"net/netip"
 	"strings"
 )
 
@@ -82,6 +83,10 @@ type Challenge struct {
 	// information to solve the DNS-01 challenge.
 	Identifier Identifier `json:"identifier,omitempty"`
 
+	// Wildcard is copied from the parent Authorization when the authorization
+	// is for a wildcard domain name (RFC 8555 §7.1.4).
+	Wildcard bool `json:"wildcard,omitempty"`
+
 	// From header of email must match with the "from" field of challenge object
 	// as described in RFC8823 §3.1 - 2, added on 3-6.3.1
 	From string `json:"from,omitempty"`
@@ -102,8 +107,8 @@ type Challenge struct {
 	// in a dns-persist-01 challenge. The client selects one to use when
 	// constructing the persistent TXT record value.
 	// Each name is in A-label format, lowercase, without trailing dot.
-	// draft-ietf-acme-dns-persist-00 §4.1
-	IssuerDomainNames []string `json:"issuer-domain-names,omitempty"`
+	// draft-ietf-acme-dns-persist-03 §3.1
+	IssuerDomainNames []string `json:"issuerDomainNames,omitempty"`
 }
 
 // HTTP01ResourcePath returns the URI path for solving the http-01 challenge.
@@ -179,29 +184,139 @@ func (c Challenge) MailReply00KeyAuthorization(mailSubject string) (string, erro
 }
 
 // DNSPersist01TXTRecordName returns the name of the TXT record to create
-// for the dns-persist-01 challenge.
-//
-// "The Authorization Domain Name is formed by prepending the label
-// '_validation-persist' to the domain name being validated."
-// draft-ietf-acme-dns-persist-00 §4.1
+// for the dns-persist-01 challenge. For "ip" identifiers, it returns
+// "_ip-validation-persist.<reverse-name>" under in-addr.arpa or ip6.arpa.
+// draft-ietf-acme-dns-persist-03 §§4, 7.1
 func (c Challenge) DNSPersist01TXTRecordName() string {
+	if c.Identifier.Type == "ip" {
+		rev, err := ipReverseZoneName(c.Identifier.Value)
+		if err != nil {
+			return ""
+		}
+		return "_ip-validation-persist." + rev
+	}
 	return "_validation-persist." + c.Identifier.Value
+}
+
+// DNSPersist01HashedAccountURI computes the domain-scoped or wildcard
+// ("*") hashed account URI for a dns-persist-01 TXT record:
+//
+//	<accountHashPrefix>sha-256/<base64url(SHA-256(len || domain || keyThumbprint || account.Location))>
+//
+// accountHashPrefix comes from the ACME server's directory meta.accountHashPrefix
+// field (for example, "https://ca.example/account-hash/"). domain is the
+// domain being validated (or "*" for a domain-wildcard record, or the reverse
+// zone name for an IP identifier).
+// draft-ietf-acme-dns-persist-03 §§4.1, 12.2
+func DNSPersist01HashedAccountURI(a Account, accountHashPrefix, domain string) (string, error) {
+	if !isValidAccountHashPrefix(accountHashPrefix) {
+		return "", fmt.Errorf("invalid or missing accountHashPrefix %q", accountHashPrefix)
+	}
+	if a.Location == "" {
+		return "", fmt.Errorf("missing account location")
+	}
+	if a.PrivateKey == nil {
+		return "", fmt.Errorf("missing account private key")
+	}
+	thumbprint, err := jwkThumbprint(a.PrivateKey.Public())
+	if err != nil {
+		return "", fmt.Errorf("computing account JWK thumbprint: %w", err)
+	}
+	canonDomain := "*"
+	if domain != "*" {
+		canonDomain = strings.TrimSuffix(domain, ".")
+		if canonDomain == "" || len(canonDomain) > 253 || canonDomain == "*" || strings.HasPrefix(canonDomain, "*.") {
+			return "", fmt.Errorf("invalid domain %q", domain)
+		}
+		for i := 0; i < len(canonDomain); i++ {
+			if canonDomain[i] <= 0x20 || canonDomain[i] >= 0x7f {
+				return "", fmt.Errorf("invalid character in domain %q", domain)
+			}
+		}
+		canonDomain = strings.ToLower(canonDomain)
+	}
+
+	h := sha256.New()
+	h.Write([]byte{byte(len(canonDomain))})
+	h.Write([]byte(canonDomain))
+	h.Write([]byte(thumbprint))
+	h.Write([]byte(a.Location))
+
+	digest := base64.RawURLEncoding.EncodeToString(h.Sum(nil))
+	return accountHashPrefix + "sha-256/" + digest, nil
 }
 
 // DNSPersist01TXTRecordValue constructs the TXT record RDATA for the
 // dns-persist-01 challenge using RFC 8659 issue-value syntax.
 //
-// issuerDomainName should be selected from the challenge's IssuerDomainNames
-// field. The account Location (URI) is used as the accounturi parameter.
-// When wildcard is true, "policy=wildcard" is appended, which authorizes
-// issuance of wildcard certificates and certificates for subdomains.
-// draft-ietf-acme-dns-persist-00 §4.1
-func (c Challenge) DNSPersist01TXTRecordValue(a Account, issuerDomainName string, wildcard bool) string {
-	value := issuerDomainName + "; accounturi=" + a.Location
-	if wildcard {
+// accountHashPrefix comes from the ACME server's directory meta.accountHashPrefix
+// field. issuerDomainName should be selected from the challenge's (or directory
+// meta's) IssuerDomainNames field. When wildcard or c.Wildcard is true,
+// "policy=wildcard" is appended, which authorizes issuance of wildcard
+// certificates and certificates for subdomains.
+// draft-ietf-acme-dns-persist-03 §§4.1, 12.2
+func (c Challenge) DNSPersist01TXTRecordValue(a Account, accountHashPrefix, issuerDomainName string, wildcard bool) (string, error) {
+	if issuerDomainName == "" || strings.ContainsAny(issuerDomainName, "; \t\r\n") {
+		return "", fmt.Errorf("invalid or missing issuer domain name %q", issuerDomainName)
+	}
+	domain := c.Identifier.Value
+	if c.Identifier.Type == "ip" {
+		rev, err := ipReverseZoneName(c.Identifier.Value)
+		if err != nil {
+			return "", err
+		}
+		domain = rev
+	}
+	hashedURI, err := DNSPersist01HashedAccountURI(a, accountHashPrefix, domain)
+	if err != nil {
+		return "", err
+	}
+	value := issuerDomainName + "; accounturi=" + hashedURI
+	if (wildcard || c.Wildcard) && c.Identifier.Type != "ip" {
 		value += "; policy=wildcard"
 	}
-	return value
+	return value, nil
+}
+
+// isValidAccountHashPrefix verifies that accountHashPrefix is non-empty and
+// contains only characters permitted in both an RFC 8659 CAA parameter value
+// (%x21-3A / %x3C-7E, excluding ';' and whitespace) and an RFC 3986 URI
+// (reserved / unreserved / "%").
+// draft-ietf-acme-dns-persist-03 §4.1
+func isValidAccountHashPrefix(prefix string) bool {
+	if prefix == "" {
+		return false
+	}
+	for i := 0; i < len(prefix); i++ {
+		b := prefix[i]
+		if (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9') {
+			continue
+		}
+		switch b {
+		case '-', '.', '_', '~', '%', ':', '/', '?', '#', '[', ']', '@', '!', '$', '&', '\'', '(', ')', '*', '+', ',', '=':
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func ipReverseZoneName(ipStr string) (string, error) {
+	addr, err := netip.ParseAddr(ipStr)
+	if err != nil || addr.Zone() != "" {
+		return "", fmt.Errorf("invalid IP identifier %q", ipStr)
+	}
+	if addr.Is4() {
+		b := addr.As4()
+		return fmt.Sprintf("%d.%d.%d.%d.in-addr.arpa", b[3], b[2], b[1], b[0]), nil
+	}
+	b := addr.As16()
+	var sb strings.Builder
+	for i := len(b) - 1; i >= 0; i-- {
+		fmt.Fprintf(&sb, "%x.%x.", b[i]&0x0f, b[i]>>4)
+	}
+	sb.WriteString("ip6.arpa")
+	return sb.String(), nil
 }
 
 // InitiateChallenge "indicates to the server that it is ready for the challenge
@@ -227,5 +342,5 @@ const (
 	ChallengeTypeEmailReply00   = "email-reply-00"   // RFC 8823 §5.2
 	ChallengeTypeAuthorityToken = "tkauth-01"        // RFC 9447 §3 - ACME Authority Token challenge type
 	ChallengeTypeDNSAccount01   = "dns-account-01"   // draft-ietf-acme-dns-account-label-01 §5
-	ChallengeTypeDNSPersist01   = "dns-persist-01"   // draft-ietf-acme-dns-persist-00
+	ChallengeTypeDNSPersist01   = "dns-persist-01"   // draft-ietf-acme-dns-persist-03
 )
