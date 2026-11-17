@@ -149,6 +149,7 @@ const (
 	ProblemTypeInvalidContact          = ProblemTypeNamespace + "invalidContact"
 	ProblemTypeMalformed               = ProblemTypeNamespace + "malformed"
 	ProblemTypeOrderNotReady           = ProblemTypeNamespace + "orderNotReady"
+	ProblemTypePersistExpired          = ProblemTypeNamespace + "persistExpired" // draft-ietf-acme-dns-persist-03 §11.4
 	ProblemTypeRateLimited             = ProblemTypeNamespace + "rateLimited"
 	ProblemTypeRejectedIdentifier      = ProblemTypeNamespace + "rejectedIdentifier"
 	ProblemTypeServerInternal          = ProblemTypeNamespace + "serverInternal"

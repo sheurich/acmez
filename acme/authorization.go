@@ -87,6 +87,7 @@ func (authz *Authorization) fillChallengeFields(account Account) error {
 	}
 	for i := 0; i < len(authz.Challenges); i++ {
 		authz.Challenges[i].Identifier = authz.Identifier
+		authz.Challenges[i].Wildcard = authz.Wildcard
 		if authz.Challenges[i].KeyAuthorization == "" {
 			authz.Challenges[i].KeyAuthorization = authz.Challenges[i].Token + "." + accountThumbprint
 		}
